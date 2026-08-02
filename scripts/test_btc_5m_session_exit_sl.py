@@ -472,13 +472,21 @@ def get_side_price_from_slug(slug: str, side: str) -> Optional[float]:
 PROFILES: dict[str, dict[str, Any]] = {
     'conservative': {
         'threshold': 0.70,
-        'risk_frac': 0.02,
+        # 25%: the market's 5-share minimum costs up to $4.85 at the highest
+        # allowed entry price, so a smaller fraction of a ~$20 account can't
+        # place an order at all. Deliberately chosen over funding the account
+        # higher -- see daily_max_loss_pct below for the consequence.
+        'risk_frac': 0.25,
         'max_notional_usd': 8.0,
         'stop_loss_pct': 0.15,
         'exit_before_sec': 20,
         'min_entry_seconds_left': 60,
         'entry_timeout_min': 60,
         'poll_sec': 5.0,
+        # At risk_frac 0.25 a single stop-out costs ~15% of a ~$4.94 stake
+        # (~$0.74) against a 5% cap (~$0.99), so the second loss of the day
+        # trips it. That is the intended brake on this sizing, not a bug:
+        # the cap is what stops 25%-per-trade from compounding.
         'daily_max_loss_pct': 0.05,
         'max_trades_per_day': 12,
         'max_consecutive_losses': 4,
