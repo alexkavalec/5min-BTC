@@ -138,7 +138,9 @@ Use this quick pre-flight checklist before any real order:
 5. **Liquidity/spread checks**
    - Ensure spread and top-of-book notional pass your minimum thresholds.
 6. **Sizing guardrails**
-   - Validate stake, max notional, and daily loss limits before execution.
+   - Validate stake and max notional before execution. There is no dollar-based
+     daily loss cap; `max_trades_per_day` and `max_consecutive_losses` are the
+     only remaining per-day brakes.
 7. **Stop / exit controls**
    - Confirm stop-loss and `exit_before_sec` are configured.
 8. **Execution mode**

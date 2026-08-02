@@ -45,11 +45,11 @@ profiles:
       stake_mode: "equity_pct_or_cap"
       # 25% because the market minimum is 5 shares, costing up to $4.85 at
       # the highest allowed entry -- a smaller fraction of a ~$20 account
-      # cannot place an order at all. The 5% daily cap is the brake: one
-      # stop-out (~$0.74) leaves little headroom, so a second halts the day.
+      # cannot place an order at all. No dollar-based daily loss cap at this
+      # sizing (removed by request); max_trades_per_day and
+      # max_consecutive_losses below are the only remaining brakes.
       risk_per_trade_pct_equity: 25
       max_notional_usd: 8
-      daily_max_loss_pct: 5
       max_trades_per_day: 12
       max_consecutive_losses: 4
     hedge:
@@ -73,7 +73,6 @@ profiles:
       stake_mode: "equity_pct_or_cap"
       risk_per_trade_pct_equity: 3
       max_notional_usd: 15
-      daily_max_loss_pct: 7
       max_trades_per_day: 20
       max_consecutive_losses: 3
     hedge:

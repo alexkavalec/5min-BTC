@@ -477,7 +477,9 @@ PROFILES: dict[str, dict[str, Any]] = {
         # 25%: the market's 5-share minimum costs up to $4.85 at the highest
         # allowed entry price, so a smaller fraction of a ~$20 account can't
         # place an order at all. Deliberately chosen over funding the account
-        # higher -- see daily_max_loss_pct below for the consequence.
+        # higher. There is no dollar-based daily loss cap at this sizing --
+        # max_trades_per_day and max_consecutive_losses below are the only
+        # remaining brakes on a bad day.
         'risk_frac': 0.25,
         'max_notional_usd': 8.0,
         'stop_loss_pct': 0.15,
@@ -485,11 +487,6 @@ PROFILES: dict[str, dict[str, Any]] = {
         'min_entry_seconds_left': 60,
         'entry_timeout_min': 60,
         'poll_sec': 5.0,
-        # At risk_frac 0.25 a single stop-out costs ~15% of a ~$4.94 stake
-        # (~$0.74) against a 5% cap (~$0.99), so the second loss of the day
-        # trips it. That is the intended brake on this sizing, not a bug:
-        # the cap is what stops 25%-per-trade from compounding.
-        'daily_max_loss_pct': 0.05,
         'max_trades_per_day': 12,
         'max_consecutive_losses': 4,
     },
@@ -502,7 +499,6 @@ PROFILES: dict[str, dict[str, Any]] = {
         'min_entry_seconds_left': 60,
         'entry_timeout_min': 60,
         'poll_sec': 5.0,
-        'daily_max_loss_pct': 0.07,
         'max_trades_per_day': 20,
         'max_consecutive_losses': 3,
     },
@@ -527,8 +523,6 @@ def apply_profile(args: argparse.Namespace) -> argparse.Namespace:
         args.entry_timeout_min = int(prof['entry_timeout_min'])
     if args.poll_sec is None:
         args.poll_sec = float(prof['poll_sec'])
-    if args.daily_max_loss_pct is None:
-        args.daily_max_loss_pct = float(prof['daily_max_loss_pct'])
     if args.max_trades_per_day is None:
         args.max_trades_per_day = int(prof['max_trades_per_day'])
     if args.max_consecutive_losses is None:
@@ -559,7 +553,6 @@ def main():
     ap.add_argument('--poll-sec', type=float, default=None)
     ap.add_argument('--close-retry-max', type=int, default=18, help='Max close retries when position is not yet visible / not immediately closable')
     ap.add_argument('--close-retry-delay-sec', type=float, default=2.0, help='Delay between close retries')
-    ap.add_argument('--daily-max-loss-pct', type=float, default=None, help='Block new entries once realized daily PnL loss reaches this fraction of account equity')
     ap.add_argument('--max-trades-per-day', type=int, default=None, help='Block new entries after this many trades in the same UTC day')
     ap.add_argument('--max-consecutive-losses', type=int, default=None, help='Block new entries after this many consecutive losing trades in the same UTC day')
     ap.add_argument('--execute', action='store_true')
@@ -630,7 +623,6 @@ def main():
             'poll_sec': args.poll_sec,
             'close_retry_max': args.close_retry_max,
             'close_retry_delay_sec': args.close_retry_delay_sec,
-            'daily_max_loss_pct': args.daily_max_loss_pct,
             'max_trades_per_day': args.max_trades_per_day,
             'max_consecutive_losses': args.max_consecutive_losses,
             'execute': args.execute,
@@ -639,18 +631,11 @@ def main():
     }
 
     daily_state = load_daily_state()
-    daily_loss_cap_usd = args.account_equity_usd * args.daily_max_loss_pct
     report['daily_state_before'] = dict(daily_state)
-    report['daily_loss_cap_usd'] = daily_loss_cap_usd
 
     blocked_reason = None
     if args.account_equity_usd <= 0:
-        # Guard first: with zero equity the loss cap is also zero, and a
-        # flat 0.00 P&L would otherwise read as "cap reached" on a day with
-        # no trades at all.
         blocked_reason = 'account_equity_unavailable'
-    elif daily_loss_cap_usd > 0 and daily_state['realized_pnl_usdc'] <= -daily_loss_cap_usd:
-        blocked_reason = 'daily_loss_cap_reached'
     elif daily_state['trade_count'] >= args.max_trades_per_day:
         blocked_reason = 'max_trades_per_day_reached'
     elif daily_state['consecutive_losses'] >= args.max_consecutive_losses:
