@@ -129,37 +129,46 @@ _POLYGON_RPCS = (
 )
 
 
-def _erc20_balance_of(rpc: str, contract: str, address: str) -> Optional[int]:
+def _erc20_balance_of(rpc: str, contract: str, address: str) -> int:
+    """Raises on any RPC-level failure (including an error response with no
+    'result' key) instead of returning None -- a failed call must never be
+    silently treated the same as a confirmed zero balance.
+    """
     data = '0x70a08231' + '000000000000000000000000' + address.lower().replace('0x', '')
     payload = {'jsonrpc': '2.0', 'id': 1, 'method': 'eth_call', 'params': [{'to': contract, 'data': data}, 'latest']}
     r = requests.post(rpc, json=payload, timeout=8)
     r.raise_for_status()
-    hexval = (r.json() or {}).get('result')
-    if not hexval or hexval == '0x':
-        return None
+    body = r.json() or {}
+    if 'error' in body:
+        raise RuntimeError(f'RPC error from {rpc} for {contract}: {body["error"]}')
+    hexval = body.get('result')
+    if not hexval:
+        raise RuntimeError(f'RPC returned no result from {rpc} for {contract}')
     return int(hexval, 16)
 
 
-def fetch_onchain_usdc_balance_usd(address: str) -> Optional[float]:
+def fetch_onchain_usdc_balance_usd(address: str) -> tuple[Optional[float], dict[str, Any]]:
     """Actual on-chain USDC (native + bridged) held by a Polygon address.
 
     Ground truth for spendable cash -- immune to any API-side indexing lag.
-    Tries a small list of public RPCs; returns None only if every RPC fails
-    outright (a wallet with $0 in both contracts still returns 0.0, not None).
+    Tries a small list of public RPCs; a single contract call failing on a
+    given RPC aborts that RPC entirely (falls through to the next one)
+    rather than silently counting the failed contract as zero. Returns
+    (value_or_None, debug_info) so a genuine $0 can be told apart from
+    "every RPC failed" in the report.
     """
+    debug: dict[str, Any] = {'address': address, 'attempts': []}
     if not address:
-        return None
+        return None, debug
     for rpc in _POLYGON_RPCS:
         try:
-            raw_total = 0
-            for contract in _USDC_CONTRACTS:
-                v = _erc20_balance_of(rpc, contract, address)
-                if v is not None:
-                    raw_total += v
-            return raw_total / 1_000_000.0
-        except Exception:
+            per_contract = {c: _erc20_balance_of(rpc, c, address) for c in _USDC_CONTRACTS}
+            debug['attempts'].append({'rpc': rpc, 'ok': True, 'raw_balances': per_contract})
+            return sum(per_contract.values()) / 1_000_000.0, debug
+        except Exception as e:
+            debug['attempts'].append({'rpc': rpc, 'ok': False, 'error': str(e)})
             continue
-    return None
+    return None, debug
 
 
 def resolve_active_current_5m_market() -> Optional[dict[str, Any]]:
@@ -473,9 +482,10 @@ def main():
     args = apply_profile(ap.parse_args())
 
     equity_source = 'manual_override'
+    equity_debug: dict[str, Any] = {}
     if args.account_equity_usd is None:
         funder = os.getenv('PM_FUNDER') or os.getenv('PM_ADDRESS') or ''
-        onchain_equity = fetch_onchain_usdc_balance_usd(funder) if funder else None
+        onchain_equity, equity_debug = fetch_onchain_usdc_balance_usd(funder) if funder else (None, {})
         if onchain_equity is not None:
             args.account_equity_usd = onchain_equity
             equity_source = 'live_onchain_usdc_balance'
@@ -500,6 +510,7 @@ def main():
             'stake_usd': args.stake_usd,
             'account_equity_usd': args.account_equity_usd,
             'account_equity_source': equity_source,
+            'account_equity_debug': equity_debug,
             'risk_frac': args.risk_frac,
             'max_notional_usd': args.max_notional_usd,
             'effective_stake_usd': effective_stake_usd,
