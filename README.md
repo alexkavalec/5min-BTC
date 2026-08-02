@@ -141,17 +141,19 @@ Use this quick pre-flight checklist before any real order:
    - Validate stake and max notional before execution. There is no dollar-based
      daily loss cap; `max_trades_per_day` and `max_consecutive_losses` are the
      only remaining per-day brakes.
-7. **Stop / exit controls**
-   - Confirm stop-loss and `exit_before_sec` are configured.
+7. **Exit controls**
+   - There is no per-trade stop-loss (removed by request); a position rides
+     the full window and exits only at `exit_before_sec` before resolution.
+     Confirm that value is set the way you want.
 8. **Execution mode**
    - Start in dry-run when changing parameters; switch to `--execute` only after validation.
 
 ## Risk Controls
 Enforced by `test_btc_5m_session_exit_sl.py` (profile defaults; override with CLI flags or the matching `--*` args):
 
-- **Per-trade risk cap**: 2% (conservative) / 3% (aggressive) of live account equity (auto-fetched, see below), capped at `max_notional_usd`
-- **Stop-loss**: 15% (conservative) / 20% (aggressive) drop in the position's live price before market resolution
-- **Daily max loss**: 5% (conservative) / 7% (aggressive) of account equity; blocks new entries for the rest of the UTC day once hit
+- **Per-trade risk cap**: 25% (conservative) / 3% (aggressive) of live account equity (auto-fetched, see below), capped at `max_notional_usd`. Conservative is 25% specifically because Polymarket's 5-share order minimum costs up to ~$4.85 at worst-case entry price; a smaller fraction of a small account cannot place an order at all.
+- **No stop-loss**: removed by request. A position rides the full window and exits only at `exit_before_sec` before resolution -- a wrong call can lose close to the full stake, not a bounded fraction of it.
+- **No dollar-based daily loss cap**: removed by request. `max_trades_per_day` and `max_consecutive_losses` are the only remaining per-day brakes.
 - **Max trades/day**: 12 (conservative) / 20 (aggressive)
 - **Max consecutive losses**: 4 (conservative) / 3 (aggressive); blocks new entries for the rest of the UTC day
 - **Max notional/trade**: strict upper bound regardless of equity sizing

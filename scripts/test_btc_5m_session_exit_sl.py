@@ -477,12 +477,13 @@ PROFILES: dict[str, dict[str, Any]] = {
         # 25%: the market's 5-share minimum costs up to $4.85 at the highest
         # allowed entry price, so a smaller fraction of a ~$20 account can't
         # place an order at all. Deliberately chosen over funding the account
-        # higher. There is no dollar-based daily loss cap at this sizing --
-        # max_trades_per_day and max_consecutive_losses below are the only
-        # remaining brakes on a bad day.
+        # higher. There is no dollar-based daily loss cap at this sizing and
+        # no per-trade stop-loss (both removed by request) -- a position
+        # rides the full window and can lose close to the full stake if
+        # wrong. max_trades_per_day and max_consecutive_losses below are the
+        # only remaining brakes on a bad day.
         'risk_frac': 0.25,
         'max_notional_usd': 8.0,
-        'stop_loss_pct': 0.15,
         'exit_before_sec': 20,
         'min_entry_seconds_left': 60,
         'entry_timeout_min': 60,
@@ -494,7 +495,6 @@ PROFILES: dict[str, dict[str, Any]] = {
         'threshold': 0.70,
         'risk_frac': 0.03,
         'max_notional_usd': 15.0,
-        'stop_loss_pct': 0.20,
         'exit_before_sec': 20,
         'min_entry_seconds_left': 60,
         'entry_timeout_min': 60,
@@ -513,8 +513,6 @@ def apply_profile(args: argparse.Namespace) -> argparse.Namespace:
         args.risk_frac = float(prof['risk_frac'])
     if args.max_notional_usd is None:
         args.max_notional_usd = float(prof['max_notional_usd'])
-    if args.stop_loss_pct is None:
-        args.stop_loss_pct = float(prof['stop_loss_pct'])
     if args.exit_before_sec is None:
         args.exit_before_sec = int(prof['exit_before_sec'])
     if args.min_entry_seconds_left is None:
@@ -546,7 +544,6 @@ def main():
     ap.add_argument('--account-equity-usd', type=float, default=(float(os.environ['BTC5M_ACCOUNT_EQUITY_USD']) if os.getenv('BTC5M_ACCOUNT_EQUITY_USD') else None), help='Account equity used for percentage-of-equity position sizing. If omitted, fetched live from Polymarket (data-api.polymarket.com/value) using PM_FUNDER; set this to force a fixed value instead.')
     ap.add_argument('--risk-frac', type=float, default=None, help='Fraction of account equity to risk per trade')
     ap.add_argument('--max-notional-usd', type=float, default=None, help='Hard cap on stake per trade regardless of equity sizing')
-    ap.add_argument('--stop-loss-pct', type=float, default=None, help='0.30 means -30%% from entry price')
     ap.add_argument('--exit-before-sec', type=int, default=None)
     ap.add_argument('--min-entry-seconds-left', type=int, default=None, help='Do not open if less seconds remain in current 5m slot')
     ap.add_argument('--entry-timeout-min', type=int, default=None)
@@ -616,7 +613,6 @@ def main():
             'risk_frac': args.risk_frac,
             'max_notional_usd': args.max_notional_usd,
             'effective_stake_usd': effective_stake_usd,
-            'stop_loss_pct': args.stop_loss_pct,
             'exit_before_sec': args.exit_before_sec,
             'min_entry_seconds_left': args.min_entry_seconds_left,
             'entry_timeout_min': args.entry_timeout_min,
@@ -829,15 +825,16 @@ def main():
 
     report['opened'] = opened
 
-    # monitor after open: stop-loss or time exit
+    # monitor after open: time exit only -- no stop-loss (removed by request).
+    # A position now rides the full window; on these binary markets price can
+    # fall much closer to zero than any stop-loss percentage before the time
+    # exit fires, so a loss can approach the full stake, not a bounded slice
+    # of it.
     end_ts = None
     try:
         end_ts = dt.datetime.fromisoformat(opened['market_end_iso'].replace('Z', '+00:00')).timestamp()
     except Exception:
         end_ts = time.time() + 300
-
-    sl_price = opened['entry_price'] * (1.0 - args.stop_loss_pct)
-    report['stop_loss_price'] = sl_price
 
     close_reason = None
     while True:
@@ -852,9 +849,6 @@ def main():
             side_px = None
         report['last_side_price'] = side_px
         report['last_check_at'] = ts_utc()
-        if side_px is not None and side_px <= sl_price:
-            close_reason = f"stop_loss_{int(args.stop_loss_pct * 100)}pct"
-            break
         time.sleep(args.poll_sec)
 
     close_debug: list[dict[str, Any]] = []

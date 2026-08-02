@@ -60,8 +60,9 @@ profiles:
       hedge_notional_usd_min: 1
       hedge_notional_usd_max: 2
     stop_loss:
-      enabled: true
-      stop_loss_pct_from_entry: 0.15
+      enabled: false  # removed by request; a position rides the full window
+      # to exit_before_sec regardless of adverse price movement -- loss on a
+      # wrong call can approach the full stake, not a bounded fraction of it.
 
   aggressive:
     description: "Higher frequency and higher risk mode."
@@ -83,8 +84,7 @@ profiles:
       hedge_notional_usd_min: 1
       hedge_notional_usd_max: 3
     stop_loss:
-      enabled: true
-      stop_loss_pct_from_entry: 0.20
+      enabled: false  # removed by request; see conservative profile above
 
 runner_mapping:
   script: "scripts/test_btc_5m_session_exit_sl.py"
@@ -94,12 +94,10 @@ runner_mapping:
     - "--account-equity-usd"
     - "--risk-frac"
     - "--max-notional-usd"
-    - "--stop-loss-pct"
     - "--exit-before-sec"
     - "--min-entry-seconds-left"
     - "--entry-timeout-min"
     - "--poll-sec"
-    - "--daily-max-loss-pct"
     - "--max-trades-per-day"
     - "--max-consecutive-losses"
     - "--execute"
