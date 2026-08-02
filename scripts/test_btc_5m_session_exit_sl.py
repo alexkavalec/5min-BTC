@@ -25,6 +25,40 @@ def ts_utc() -> str:
     return now_utc().isoformat().replace('+00:00', 'Z')
 
 
+def today_str() -> str:
+    return now_utc().strftime('%Y-%m-%d')
+
+
+def state_path() -> Path:
+    d = Path(__file__).resolve().parents[1] / 'runtime'
+    d.mkdir(parents=True, exist_ok=True)
+    return d / 'btc5m_daily_state.json'
+
+
+def load_daily_state() -> dict[str, Any]:
+    """Daily loss/trade-count/streak tracking, persisted across invocations.
+
+    Each process handles at most one trade then exits, so this state has to
+    live on disk (not in memory) for the daily cap to mean anything under the
+    Railway loop's restart-per-trade model.
+    """
+    fresh = {'date': today_str(), 'trade_count': 0, 'realized_pnl_usdc': 0.0, 'consecutive_losses': 0}
+    try:
+        data = json.loads(state_path().read_text(encoding='utf-8'))
+        if data.get('date') != fresh['date']:
+            return fresh
+        return {**fresh, **data}
+    except Exception:
+        return fresh
+
+
+def save_daily_state(state: dict[str, Any]) -> None:
+    p = state_path()
+    tmp = p.with_suffix('.tmp')
+    tmp.write_text(json.dumps(state, ensure_ascii=False), encoding='utf-8')
+    tmp.replace(p)
+
+
 def parse_json_objects(text: str) -> list[dict[str, Any]]:
     out = []
     cur = []
@@ -284,21 +318,29 @@ def get_side_price_from_slug(slug: str, side: str) -> Optional[float]:
 PROFILES: dict[str, dict[str, Any]] = {
     'conservative': {
         'threshold': 0.70,
-        'stake_usd': 5.0,
-        'stop_loss_pct': 0.25,
+        'risk_frac': 0.02,
+        'max_notional_usd': 8.0,
+        'stop_loss_pct': 0.15,
         'exit_before_sec': 20,
         'min_entry_seconds_left': 60,
         'entry_timeout_min': 60,
         'poll_sec': 5.0,
+        'daily_max_loss_pct': 0.05,
+        'max_trades_per_day': 12,
+        'max_consecutive_losses': 4,
     },
     'aggressive': {
         'threshold': 0.70,
-        'stake_usd': 5.0,
-        'stop_loss_pct': 0.30,
+        'risk_frac': 0.03,
+        'max_notional_usd': 15.0,
+        'stop_loss_pct': 0.20,
         'exit_before_sec': 20,
         'min_entry_seconds_left': 60,
         'entry_timeout_min': 60,
         'poll_sec': 5.0,
+        'daily_max_loss_pct': 0.07,
+        'max_trades_per_day': 20,
+        'max_consecutive_losses': 3,
     },
 }
 
@@ -307,8 +349,10 @@ def apply_profile(args: argparse.Namespace) -> argparse.Namespace:
     prof = PROFILES.get(args.profile or 'conservative', PROFILES['conservative'])
     if args.threshold is None:
         args.threshold = float(prof['threshold'])
-    if args.stake_usd is None:
-        args.stake_usd = float(prof['stake_usd'])
+    if args.risk_frac is None:
+        args.risk_frac = float(prof['risk_frac'])
+    if args.max_notional_usd is None:
+        args.max_notional_usd = float(prof['max_notional_usd'])
     if args.stop_loss_pct is None:
         args.stop_loss_pct = float(prof['stop_loss_pct'])
     if args.exit_before_sec is None:
@@ -319,6 +363,12 @@ def apply_profile(args: argparse.Namespace) -> argparse.Namespace:
         args.entry_timeout_min = int(prof['entry_timeout_min'])
     if args.poll_sec is None:
         args.poll_sec = float(prof['poll_sec'])
+    if args.daily_max_loss_pct is None:
+        args.daily_max_loss_pct = float(prof['daily_max_loss_pct'])
+    if args.max_trades_per_day is None:
+        args.max_trades_per_day = int(prof['max_trades_per_day'])
+    if args.max_consecutive_losses is None:
+        args.max_consecutive_losses = int(prof['max_consecutive_losses'])
     return args
 
 
@@ -334,7 +384,10 @@ def main():
     ap.add_argument('--repo', default=default_repo_path())
     ap.add_argument('--profile', choices=['conservative', 'aggressive'], default='conservative')
     ap.add_argument('--threshold', type=float, default=None)
-    ap.add_argument('--stake-usd', type=float, default=None)
+    ap.add_argument('--stake-usd', type=float, default=None, help='Flat dollar stake override; bypasses equity-percentage sizing when set')
+    ap.add_argument('--account-equity-usd', type=float, default=float(os.getenv('BTC5M_ACCOUNT_EQUITY_USD', '100')), help='Account equity used for percentage-of-equity position sizing; update as your balance changes')
+    ap.add_argument('--risk-frac', type=float, default=None, help='Fraction of account equity to risk per trade')
+    ap.add_argument('--max-notional-usd', type=float, default=None, help='Hard cap on stake per trade regardless of equity sizing')
     ap.add_argument('--stop-loss-pct', type=float, default=None, help='0.30 means -30%% from entry price')
     ap.add_argument('--exit-before-sec', type=int, default=None)
     ap.add_argument('--min-entry-seconds-left', type=int, default=None, help='Do not open if less seconds remain in current 5m slot')
@@ -342,8 +395,15 @@ def main():
     ap.add_argument('--poll-sec', type=float, default=None)
     ap.add_argument('--close-retry-max', type=int, default=18, help='Max close retries when position is not yet visible / not immediately closable')
     ap.add_argument('--close-retry-delay-sec', type=float, default=2.0, help='Delay between close retries')
+    ap.add_argument('--daily-max-loss-pct', type=float, default=None, help='Block new entries once realized daily PnL loss reaches this fraction of account equity')
+    ap.add_argument('--max-trades-per-day', type=int, default=None, help='Block new entries after this many trades in the same UTC day')
+    ap.add_argument('--max-consecutive-losses', type=int, default=None, help='Block new entries after this many consecutive losing trades in the same UTC day')
     ap.add_argument('--execute', action='store_true')
     args = apply_profile(ap.parse_args())
+
+    effective_stake_usd = args.stake_usd if args.stake_usd is not None else min(
+        args.account_equity_usd * args.risk_frac, args.max_notional_usd
+    )
 
     report: dict[str, Any] = {
         'started_at': ts_utc(),
@@ -351,6 +411,10 @@ def main():
             'profile': args.profile,
             'threshold': args.threshold,
             'stake_usd': args.stake_usd,
+            'account_equity_usd': args.account_equity_usd,
+            'risk_frac': args.risk_frac,
+            'max_notional_usd': args.max_notional_usd,
+            'effective_stake_usd': effective_stake_usd,
             'stop_loss_pct': args.stop_loss_pct,
             'exit_before_sec': args.exit_before_sec,
             'min_entry_seconds_left': args.min_entry_seconds_left,
@@ -358,10 +422,33 @@ def main():
             'poll_sec': args.poll_sec,
             'close_retry_max': args.close_retry_max,
             'close_retry_delay_sec': args.close_retry_delay_sec,
+            'daily_max_loss_pct': args.daily_max_loss_pct,
+            'max_trades_per_day': args.max_trades_per_day,
+            'max_consecutive_losses': args.max_consecutive_losses,
             'execute': args.execute,
         },
         'attempts': [],
     }
+
+    daily_state = load_daily_state()
+    daily_loss_cap_usd = args.account_equity_usd * args.daily_max_loss_pct
+    report['daily_state_before'] = dict(daily_state)
+    report['daily_loss_cap_usd'] = daily_loss_cap_usd
+
+    blocked_reason = None
+    if daily_state['realized_pnl_usdc'] <= -daily_loss_cap_usd:
+        blocked_reason = 'daily_loss_cap_reached'
+    elif daily_state['trade_count'] >= args.max_trades_per_day:
+        blocked_reason = 'max_trades_per_day_reached'
+    elif daily_state['consecutive_losses'] >= args.max_consecutive_losses:
+        blocked_reason = 'max_consecutive_losses_reached'
+
+    if blocked_reason:
+        report['finished_at'] = ts_utc()
+        report['result'] = 'blocked'
+        report['blocked_reason'] = blocked_reason
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return
 
     deadline = time.time() + args.entry_timeout_min * 60
     opened = None
@@ -442,7 +529,7 @@ def main():
 
             side, trigger_price = sorted(candidates, key=lambda x: x[1], reverse=True)[0]
 
-            out, objs = run_open(args.repo, slug, side, args.stake_usd, args.execute)
+            out, objs = run_open(args.repo, slug, side, effective_stake_usd, args.execute)
             post = None
             runner = None
             for o in objs:
@@ -681,6 +768,14 @@ def main():
     if closed['close_usdc']:
         pnl = round(closed['close_usdc'] - opened['cost_usdc'], 6)
     report['realized_cashflow_pnl_usdc'] = pnl
+
+    daily_state['trade_count'] += 1
+    if pnl is not None:
+        daily_state['realized_pnl_usdc'] = round(daily_state['realized_pnl_usdc'] + pnl, 6)
+        daily_state['consecutive_losses'] = daily_state['consecutive_losses'] + 1 if pnl < 0 else 0
+    save_daily_state(daily_state)
+    report['daily_state_after'] = dict(daily_state)
+
     report['finished_at'] = ts_utc()
     report['result'] = 'done'
 

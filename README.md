@@ -83,13 +83,20 @@ next, so the service trades continuously instead of running once and idling.
    `Dockerfile`.
 2. Set environment variables (Railway → service → Variables), nothing here
    is baked into the image:
-   - `PM_PRIVATE_KEY`, `PM_FUNDER` (or `PM_ADDRESS`), `PM_API_KEY`,
-     `PM_API_SECRET`, `PM_API_PASSPHRASE`
+   - `PM_PRIVATE_KEY`, `PM_FUNDER` (or `PM_ADDRESS`)
    - `PM_SIGNATURE_TYPE` — **set this explicitly.** The strategy runner
      defaults to `2` if unset, but the execution engine defaults to `1`;
      leaving it unset lets the two processes silently disagree. Use the
      signature type that matches your wallet (`2` for a Polymarket proxy
      wallet, `1` for a plain EOA).
+   - `PM_API_KEY` / `PM_API_SECRET` / `PM_API_PASSPHRASE` — optional; the
+     execution engine self-derives these from `PM_PRIVATE_KEY` if left
+     unset. Only needed for the strategy runner's stuck-order
+     cancel-and-repost fallback, which no-ops harmlessly without them.
+   - `BTC5M_ACCOUNT_EQUITY_USD` — **set this to your real balance.**
+     Position sizing is a percentage of this value; leaving it at the
+     default (`100`) will size trades for a $100 account regardless of
+     what's actually funded.
    - Optional tuning: `BTC5M_PROFILE` (`conservative`|`aggressive`,
      default `conservative`), `BTC5M_ENTRY_TIMEOUT_MIN` (default `8`),
      `BTC5M_POLL_SEC` (default `2`), `BTC5M_CLOSE_RETRY_MAX` (default `30`),
@@ -102,10 +109,14 @@ next, so the service trades continuously instead of running once and idling.
 4. Only once that looks correct, set `BTC5M_EXECUTE=true` and redeploy to go
    live.
 
-Known gaps this deployment does **not** cover (see the strategy profiles for
-what's documented-but-unenforced): no daily-loss cap, no max-trades-per-day
-limit, no hedge logic. Treat those as still-open risk work, not something
-this container protects you from.
+This deployment enforces a daily-loss cap, a max-trades-per-day limit, and a
+max-consecutive-losses circuit breaker (see `config/btc_5m_profiles.yaml` and
+`--account-equity-usd`/`--daily-max-loss-pct`/`--max-trades-per-day`/
+`--max-consecutive-losses`). That state lives in `./runtime` and persists
+across the loop's one-trade-per-process restarts, but **not** across a
+redeploy — a fresh deploy mid-day resets the counters. Hedge logic from the
+strategy doc is still not implemented anywhere; treat it as aspirational
+only.
 
 ## Execution Checklist (Before Live Trade)
 Use this quick pre-flight checklist before any real order:
@@ -127,13 +138,15 @@ Use this quick pre-flight checklist before any real order:
 8. **Execution mode**
    - Start in dry-run when changing parameters; switch to `--execute` only after validation.
 
-## Risk Controls Template
-Suggested baseline controls (adapt to your risk profile):
+## Risk Controls
+Enforced by `test_btc_5m_session_exit_sl.py` (profile defaults; override with CLI flags or the matching `--*` args):
 
-- **Per-trade risk cap**: 1%-15% of account equity (profile dependent)
-- **Daily max loss**: hard stop at 10%-15%
-- **Max trades/day**: fixed ceiling to avoid overtrading
-- **Max notional/trade**: strict upper bound
+- **Per-trade risk cap**: 2% (conservative) / 3% (aggressive) of `--account-equity-usd`, capped at `max_notional_usd`
+- **Stop-loss**: 15% (conservative) / 20% (aggressive) drop in the position's live price before market resolution
+- **Daily max loss**: 5% (conservative) / 7% (aggressive) of account equity; blocks new entries for the rest of the UTC day once hit
+- **Max trades/day**: 12 (conservative) / 20 (aggressive)
+- **Max consecutive losses**: 4 (conservative) / 3 (aggressive); blocks new entries for the rest of the UTC day
+- **Max notional/trade**: strict upper bound regardless of equity sizing
 - **Quote staleness guard**: skip if market data is stale
 - **Spread guard**: skip when spread exceeds threshold
 - **Liquidity guard**: skip when top ask/bid notional is too thin
