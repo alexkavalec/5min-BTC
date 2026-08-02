@@ -71,6 +71,42 @@ scripts/btc5m_docker.sh status
 scripts/btc5m_docker.sh down
 ```
 
+### Deploy on Railway (always-on)
+This repo's `Dockerfile` builds a self-contained image: it clones the execution
+engine (`alexkavalec/polymarket-hl-strategy`) at build time, gives it its own
+venv, and runs `scripts/btc5m_railway_loop.sh` as the container's main
+process. That script runs one entry/monitor/close cycle at a time (the
+strategy runner exits after at most one trade) and immediately starts the
+next, so the service trades continuously instead of running once and idling.
+
+1. Create a Railway project from this GitHub repo — Railway auto-detects the
+   `Dockerfile`.
+2. Set environment variables (Railway → service → Variables), nothing here
+   is baked into the image:
+   - `PM_PRIVATE_KEY`, `PM_FUNDER` (or `PM_ADDRESS`), `PM_API_KEY`,
+     `PM_API_SECRET`, `PM_API_PASSPHRASE`
+   - `PM_SIGNATURE_TYPE` — **set this explicitly.** The strategy runner
+     defaults to `2` if unset, but the execution engine defaults to `1`;
+     leaving it unset lets the two processes silently disagree. Use the
+     signature type that matches your wallet (`2` for a Polymarket proxy
+     wallet, `1` for a plain EOA).
+   - Optional tuning: `BTC5M_PROFILE` (`conservative`|`aggressive`,
+     default `conservative`), `BTC5M_ENTRY_TIMEOUT_MIN` (default `8`),
+     `BTC5M_POLL_SEC` (default `2`), `BTC5M_CLOSE_RETRY_MAX` (default `30`),
+     `BTC5M_CLOSE_RETRY_DELAY_SEC` (default `2`),
+     `BTC5M_CYCLE_COOLDOWN_SEC` (default `5`)
+3. Leave `BTC5M_EXECUTE` unset (or `false`) on the first deploy — the loop
+   runs in dry-run mode by default. Watch the Railway logs for a few cycles
+   to confirm market resolution, threshold detection, and engine hand-off
+   look right.
+4. Only once that looks correct, set `BTC5M_EXECUTE=true` and redeploy to go
+   live.
+
+Known gaps this deployment does **not** cover (see the strategy profiles for
+what's documented-but-unenforced): no daily-loss cap, no max-trades-per-day
+limit, no hedge logic. Treat those as still-open risk work, not something
+this container protects you from.
+
 ## Execution Checklist (Before Live Trade)
 Use this quick pre-flight checklist before any real order:
 
