@@ -10,9 +10,11 @@ from pathlib import Path
 
 import requests
 
-from py_clob_client.client import ClobClient
-from py_clob_client.constants import POLYGON
-from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
+# v2 client, matching the execution engine: this script runs under the
+# engine's venv, and the deposit-wallet signature type its account uses is
+# only fully supported here.
+from py_clob_client_v2 import ApiCreds, AssetType, BalanceAllowanceParams, ClobClient
+from py_clob_client_v2.constants import POLYGON
 
 UTC = dt.timezone.utc
 
@@ -221,17 +223,31 @@ def market_side_prices(market: dict[str, Any]) -> tuple[float, float, str, str, 
     return up_p, dn_p, up_t, dn_t, str(market.get('slug') or market.get('_event_slug') or ''), str(market.get('endDate') or market.get('endDateIso') or '')
 
 
+def _book_levels(book, side: str) -> list:
+    """The v2 client returns the book as a raw dict; v1 returned an object
+    with .bids/.asks. Accept either so a client swap can't silently turn
+    every quote into None (which reads as "no market" and blocks entries).
+    """
+    if isinstance(book, dict):
+        return book.get(side) or []
+    return getattr(book, side, None) or []
+
+
+def _level_price(level) -> float:
+    if isinstance(level, dict):
+        return float(level.get('price') or 0)
+    return float(getattr(level, 'price', 0) or 0)
+
+
 def _best_bid_ask(book) -> tuple[Optional[float], Optional[float]]:
-    bids = getattr(book, 'bids', []) or []
-    asks = getattr(book, 'asks', []) or []
     best_bid = None
     best_ask = None
-    for b in bids:
-        p = float(getattr(b, 'price', 0) or 0)
+    for b in _book_levels(book, 'bids'):
+        p = _level_price(b)
         if best_bid is None or p > best_bid:
             best_bid = p
-    for a in asks:
-        p = float(getattr(a, 'price', 0) or 0)
+    for a in _book_levels(book, 'asks'):
+        p = _level_price(a)
         if best_ask is None or p < best_ask:
             best_ask = p
     return best_bid, best_ask
@@ -323,7 +339,11 @@ def fetch_clob_collateral_balance_usd(clob_base: str = 'https://clob.polymarket.
         if v1 and v2 and v3:
             creds = ApiCreds(api_key=v1, api_secret=v2, api_passphrase=v3)
         else:
-            creds = client.create_or_derive_api_creds()
+            # v1's create-then-derive convenience, which v2 dropped.
+            try:
+                creds = client.create_api_key()
+            except Exception:
+                creds = client.derive_api_key()
         client.set_api_creds(creds)
     except Exception as e:
         debug['error'] = str(e)
