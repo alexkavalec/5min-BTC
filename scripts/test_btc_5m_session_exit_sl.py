@@ -99,7 +99,12 @@ def fetch_event(slug: str) -> Optional[dict[str, Any]]:
 
 
 def fetch_account_value_usd(address: str) -> Optional[float]:
-    """Live portfolio value (cash + open positions) from Polymarket's public data API."""
+    """Live portfolio value (cash + open positions) from Polymarket's public data API.
+
+    Observed to sometimes disagree with the actual spendable USDC cash shown
+    in Polymarket's own UI (possibly an indexing lag, or a narrower metric
+    than true cash) -- kept only as a fallback behind the on-chain check.
+    """
     try:
         r = requests.get('https://data-api.polymarket.com/value', params={'user': address}, timeout=10)
         r.raise_for_status()
@@ -108,6 +113,52 @@ def fetch_account_value_usd(address: str) -> Optional[float]:
             return float(arr[0].get('value'))
     except Exception:
         pass
+    return None
+
+
+# Polygon USDC contracts Polymarket has used (native + the older bridged
+# USDC.e); balances are summed since either could hold funds.
+_USDC_CONTRACTS = (
+    '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',  # native USDC
+    '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',  # bridged USDC.e
+)
+_POLYGON_RPCS = (
+    'https://polygon-rpc.com',
+    'https://rpc.ankr.com/polygon',
+    'https://polygon.llamarpc.com',
+)
+
+
+def _erc20_balance_of(rpc: str, contract: str, address: str) -> Optional[int]:
+    data = '0x70a08231' + '000000000000000000000000' + address.lower().replace('0x', '')
+    payload = {'jsonrpc': '2.0', 'id': 1, 'method': 'eth_call', 'params': [{'to': contract, 'data': data}, 'latest']}
+    r = requests.post(rpc, json=payload, timeout=8)
+    r.raise_for_status()
+    hexval = (r.json() or {}).get('result')
+    if not hexval or hexval == '0x':
+        return None
+    return int(hexval, 16)
+
+
+def fetch_onchain_usdc_balance_usd(address: str) -> Optional[float]:
+    """Actual on-chain USDC (native + bridged) held by a Polygon address.
+
+    Ground truth for spendable cash -- immune to any API-side indexing lag.
+    Tries a small list of public RPCs; returns None only if every RPC fails
+    outright (a wallet with $0 in both contracts still returns 0.0, not None).
+    """
+    if not address:
+        return None
+    for rpc in _POLYGON_RPCS:
+        try:
+            raw_total = 0
+            for contract in _USDC_CONTRACTS:
+                v = _erc20_balance_of(rpc, contract, address)
+                if v is not None:
+                    raw_total += v
+            return raw_total / 1_000_000.0
+        except Exception:
+            continue
     return None
 
 
@@ -424,13 +475,18 @@ def main():
     equity_source = 'manual_override'
     if args.account_equity_usd is None:
         funder = os.getenv('PM_FUNDER') or os.getenv('PM_ADDRESS') or ''
-        live_equity = fetch_account_value_usd(funder) if funder else None
-        if live_equity is not None:
-            args.account_equity_usd = live_equity
-            equity_source = 'live_polymarket_value'
+        onchain_equity = fetch_onchain_usdc_balance_usd(funder) if funder else None
+        if onchain_equity is not None:
+            args.account_equity_usd = onchain_equity
+            equity_source = 'live_onchain_usdc_balance'
         else:
-            args.account_equity_usd = float(os.getenv('BTC5M_ACCOUNT_EQUITY_USD_FALLBACK', '100'))
-            equity_source = 'fallback_static_fetch_failed'
+            live_equity = fetch_account_value_usd(funder) if funder else None
+            if live_equity is not None:
+                args.account_equity_usd = live_equity
+                equity_source = 'live_polymarket_value_fallback'
+            else:
+                args.account_equity_usd = float(os.getenv('BTC5M_ACCOUNT_EQUITY_USD_FALLBACK', '100'))
+                equity_source = 'fallback_static_fetch_failed'
 
     effective_stake_usd = args.stake_usd if args.stake_usd is not None else min(
         args.account_equity_usd * args.risk_frac, args.max_notional_usd

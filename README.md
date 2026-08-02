@@ -94,13 +94,15 @@ next, so the service trades continuously instead of running once and idling.
      unset. Only needed for the strategy runner's stuck-order
      cancel-and-repost fallback, which no-ops harmlessly without them.
    - `BTC5M_ACCOUNT_EQUITY_USD` — leave unset. Position sizing fetches your
-     live portfolio value every cycle from Polymarket's public data API
-     (`data-api.polymarket.com/value`) using `PM_FUNDER`, so it tracks your
-     real balance automatically with no manual updates. Only set this if you
-     want to force a fixed value instead (overrides the live fetch). If the
-     live fetch ever fails, it falls back to `BTC5M_ACCOUNT_EQUITY_USD_FALLBACK`
-     (default `100`) — check `account_equity_source` in the JSON output to
-     see which path was used on any given run.
+     real balance live every cycle using `PM_FUNDER`, no manual updates
+     needed: first the on-chain USDC balance (native + bridged) via public
+     Polygon RPC (ground truth, immune to any indexer lag), falling back to
+     `data-api.polymarket.com/value` if that fails, falling back to
+     `BTC5M_ACCOUNT_EQUITY_USD_FALLBACK` (default `100`) if both fail. Check
+     `account_equity_source` in the JSON output (`live_onchain_usdc_balance`
+     / `live_polymarket_value_fallback` / `fallback_static_fetch_failed`) to
+     see which path was actually used on any given run. Only set this
+     variable if you deliberately want to force a fixed value instead.
    - Optional tuning: `BTC5M_PROFILE` (`conservative`|`aggressive`,
      default `conservative`), `BTC5M_ENTRY_TIMEOUT_MIN` (default `8`),
      `BTC5M_POLL_SEC` (default `2`), `BTC5M_CLOSE_RETRY_MAX` (default `30`),
