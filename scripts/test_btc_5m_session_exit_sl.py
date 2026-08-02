@@ -16,6 +16,13 @@ from py_clob_client.clob_types import ApiCreds
 
 UTC = dt.timezone.utc
 
+# Trim the printed 'attempts' heartbeat log to its last N entries. A full
+# entry-timeout window can accumulate hundreds of heartbeats; dumping all of
+# them as one giant JSON blob at process exit blows past Railway's per-second
+# log-line cap and gets lines dropped/interleaved. The full count is still
+# reported separately (attempts_total_count).
+ATTEMPTS_LOG_TAIL = 40
+
 
 def now_utc() -> dt.datetime:
     return dt.datetime.now(UTC)
@@ -564,6 +571,8 @@ def main():
     if not opened:
         report['finished_at'] = ts_utc()
         report['result'] = 'no_entry_timeout'
+        report['attempts_total_count'] = len(report['attempts'])
+        report['attempts'] = report['attempts'][-ATTEMPTS_LOG_TAIL:]
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return
 
@@ -778,6 +787,8 @@ def main():
 
     report['finished_at'] = ts_utc()
     report['result'] = 'done'
+    report['attempts_total_count'] = len(report['attempts'])
+    report['attempts'] = report['attempts'][-ATTEMPTS_LOG_TAIL:]
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
