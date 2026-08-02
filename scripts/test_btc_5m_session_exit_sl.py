@@ -98,6 +98,19 @@ def fetch_event(slug: str) -> Optional[dict[str, Any]]:
     return arr[0] if arr else None
 
 
+def fetch_account_value_usd(address: str) -> Optional[float]:
+    """Live portfolio value (cash + open positions) from Polymarket's public data API."""
+    try:
+        r = requests.get('https://data-api.polymarket.com/value', params={'user': address}, timeout=10)
+        r.raise_for_status()
+        arr = r.json()
+        if isinstance(arr, list) and arr:
+            return float(arr[0].get('value'))
+    except Exception:
+        pass
+    return None
+
+
 def resolve_active_current_5m_market() -> Optional[dict[str, Any]]:
     """Return active BTC 5m market for the current slot only."""
     now = int(time.time())
@@ -392,7 +405,7 @@ def main():
     ap.add_argument('--profile', choices=['conservative', 'aggressive'], default='conservative')
     ap.add_argument('--threshold', type=float, default=None)
     ap.add_argument('--stake-usd', type=float, default=None, help='Flat dollar stake override; bypasses equity-percentage sizing when set')
-    ap.add_argument('--account-equity-usd', type=float, default=float(os.getenv('BTC5M_ACCOUNT_EQUITY_USD', '100')), help='Account equity used for percentage-of-equity position sizing; update as your balance changes')
+    ap.add_argument('--account-equity-usd', type=float, default=(float(os.environ['BTC5M_ACCOUNT_EQUITY_USD']) if os.getenv('BTC5M_ACCOUNT_EQUITY_USD') else None), help='Account equity used for percentage-of-equity position sizing. If omitted, fetched live from Polymarket (data-api.polymarket.com/value) using PM_FUNDER; set this to force a fixed value instead.')
     ap.add_argument('--risk-frac', type=float, default=None, help='Fraction of account equity to risk per trade')
     ap.add_argument('--max-notional-usd', type=float, default=None, help='Hard cap on stake per trade regardless of equity sizing')
     ap.add_argument('--stop-loss-pct', type=float, default=None, help='0.30 means -30%% from entry price')
@@ -408,6 +421,17 @@ def main():
     ap.add_argument('--execute', action='store_true')
     args = apply_profile(ap.parse_args())
 
+    equity_source = 'manual_override'
+    if args.account_equity_usd is None:
+        funder = os.getenv('PM_FUNDER') or os.getenv('PM_ADDRESS') or ''
+        live_equity = fetch_account_value_usd(funder) if funder else None
+        if live_equity is not None:
+            args.account_equity_usd = live_equity
+            equity_source = 'live_polymarket_value'
+        else:
+            args.account_equity_usd = float(os.getenv('BTC5M_ACCOUNT_EQUITY_USD_FALLBACK', '100'))
+            equity_source = 'fallback_static_fetch_failed'
+
     effective_stake_usd = args.stake_usd if args.stake_usd is not None else min(
         args.account_equity_usd * args.risk_frac, args.max_notional_usd
     )
@@ -419,6 +443,7 @@ def main():
             'threshold': args.threshold,
             'stake_usd': args.stake_usd,
             'account_equity_usd': args.account_equity_usd,
+            'account_equity_source': equity_source,
             'risk_frac': args.risk_frac,
             'max_notional_usd': args.max_notional_usd,
             'effective_stake_usd': effective_stake_usd,

@@ -100,11 +100,12 @@ runner_mapping:
     - "--max-trades-per-day"
     - "--max-consecutive-losses"
     - "--execute"
-  example_conservative_now: ".venv/bin/python scripts/test_btc_5m_session_exit_sl.py --profile conservative --account-equity-usd 200 --execute"
-  example_aggressive_now: ".venv/bin/python scripts/test_btc_5m_session_exit_sl.py --profile aggressive --account-equity-usd 200 --execute"
+  example_conservative_now: ".venv/bin/python scripts/test_btc_5m_session_exit_sl.py --profile conservative --execute"
+  example_aggressive_now: ".venv/bin/python scripts/test_btc_5m_session_exit_sl.py --profile aggressive --execute"
 
 notes:
   - "Current 5m runner uses threshold/side-strength logic; impulse filter integration can be extended at strategy layer."
   - "Entry behavior: continuous CLOB ask monitoring; if UP/DOWN >= threshold, enter on stronger side."
-  - "Sizing defaults to risk_per_trade_pct_equity * --account-equity-usd, capped at max_notional_usd; --stake-usd overrides with a flat dollar amount instead."
+  - "Sizing defaults to risk_per_trade_pct_equity * account_equity_usd, capped at max_notional_usd; --stake-usd overrides with a flat dollar amount instead."
+  - "account_equity_usd is fetched live from Polymarket (data-api.polymarket.com/value) via PM_FUNDER each run unless --account-equity-usd / BTC5M_ACCOUNT_EQUITY_USD forces a fixed value."
   - "Daily loss cap, max trades/day, and max consecutive losses are enforced via a small JSON state file in ./runtime, persisted across the one-trade-per-process runner invocations."

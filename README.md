@@ -93,10 +93,14 @@ next, so the service trades continuously instead of running once and idling.
      execution engine self-derives these from `PM_PRIVATE_KEY` if left
      unset. Only needed for the strategy runner's stuck-order
      cancel-and-repost fallback, which no-ops harmlessly without them.
-   - `BTC5M_ACCOUNT_EQUITY_USD` — **set this to your real balance.**
-     Position sizing is a percentage of this value; leaving it at the
-     default (`100`) will size trades for a $100 account regardless of
-     what's actually funded.
+   - `BTC5M_ACCOUNT_EQUITY_USD` — leave unset. Position sizing fetches your
+     live portfolio value every cycle from Polymarket's public data API
+     (`data-api.polymarket.com/value`) using `PM_FUNDER`, so it tracks your
+     real balance automatically with no manual updates. Only set this if you
+     want to force a fixed value instead (overrides the live fetch). If the
+     live fetch ever fails, it falls back to `BTC5M_ACCOUNT_EQUITY_USD_FALLBACK`
+     (default `100`) — check `account_equity_source` in the JSON output to
+     see which path was used on any given run.
    - Optional tuning: `BTC5M_PROFILE` (`conservative`|`aggressive`,
      default `conservative`), `BTC5M_ENTRY_TIMEOUT_MIN` (default `8`),
      `BTC5M_POLL_SEC` (default `2`), `BTC5M_CLOSE_RETRY_MAX` (default `30`),
@@ -141,7 +145,7 @@ Use this quick pre-flight checklist before any real order:
 ## Risk Controls
 Enforced by `test_btc_5m_session_exit_sl.py` (profile defaults; override with CLI flags or the matching `--*` args):
 
-- **Per-trade risk cap**: 2% (conservative) / 3% (aggressive) of `--account-equity-usd`, capped at `max_notional_usd`
+- **Per-trade risk cap**: 2% (conservative) / 3% (aggressive) of live account equity (auto-fetched, see below), capped at `max_notional_usd`
 - **Stop-loss**: 15% (conservative) / 20% (aggressive) drop in the position's live price before market resolution
 - **Daily max loss**: 5% (conservative) / 7% (aggressive) of account equity; blocks new entries for the rest of the UTC day once hit
 - **Max trades/day**: 12 (conservative) / 20 (aggressive)
