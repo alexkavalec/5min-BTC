@@ -12,7 +12,7 @@ import requests
 
 from py_clob_client.client import ClobClient
 from py_clob_client.constants import POLYGON
-from py_clob_client.clob_types import ApiCreds
+from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
 
 UTC = dt.timezone.utc
 
@@ -285,6 +285,43 @@ def auth_clob_client(clob_base: str = 'https://clob.polymarket.com') -> Optional
         return None
 
 
+def fetch_clob_collateral_balance_usd(clob_base: str = 'https://clob.polymarket.com') -> tuple[Optional[float], dict[str, Any]]:
+    """Spendable USDC collateral per Polymarket's own CLOB backend.
+
+    This is the same accounting the trading engine itself uses to know what
+    it can actually spend -- authoritative regardless of whether Polymarket
+    custodies collateral in the user's own wallet or a pooled contract,
+    unlike guessing from public on-chain/API data.
+    """
+    debug: dict[str, Any] = {}
+    key = os.getenv('PM_PRIVATE_KEY') or ''
+    if not key:
+        debug['error'] = 'PM_PRIVATE_KEY not set'
+        return None, debug
+    try:
+        funder = os.getenv('PM_FUNDER') or os.getenv('PM_ADDRESS') or None
+        sig = int(os.getenv('PM_SIGNATURE_TYPE', '2'))
+        client = ClobClient(host=clob_base, chain_id=POLYGON, key=key, signature_type=sig, funder=funder)
+        v1 = os.getenv('PM_API_KEY') or ''
+        v2 = os.getenv('PM_API_SECRET') or ''
+        v3 = os.getenv('PM_API_PASSPHRASE') or ''
+        if v1 and v2 and v3:
+            creds = ApiCreds(api_key=v1, api_secret=v2, api_passphrase=v3)
+        else:
+            creds = client.create_or_derive_api_creds()
+        client.set_api_creds(creds)
+
+        raw = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=sig))
+        debug['raw'] = raw
+        if not isinstance(raw, dict) or raw.get('balance') is None:
+            debug['error'] = 'no balance field in response'
+            return None, debug
+        return float(raw['balance']) / 1_000_000.0, debug
+    except Exception as e:
+        debug['error'] = str(e)
+        return None, debug
+
+
 def poll_order_status(client: Optional[ClobClient], order_id: str, wait_sec: float = 6.0, step_sec: float = 1.0) -> tuple[str, Optional[dict[str, Any]]]:
     if client is None or not order_id:
         return '', None
@@ -467,17 +504,25 @@ def main():
     equity_source = 'manual_override'
     equity_debug: dict[str, Any] = {}
     if args.account_equity_usd is None:
-        funder = os.getenv('PM_FUNDER') or os.getenv('PM_ADDRESS') or ''
-        onchain_equity, equity_debug = fetch_onchain_usdc_balance_usd(funder) if funder else (None, {})
-        if onchain_equity is not None:
-            args.account_equity_usd = onchain_equity
-            equity_source = 'live_onchain_usdc_balance'
+        # Primary: ask the CLOB's own accounting directly -- authoritative
+        # regardless of whether Polymarket custodies collateral in the
+        # user's own wallet or pooled elsewhere (an on-chain wallet check
+        # can't see pooled custody; this asks the exchange itself).
+        clob_equity, clob_debug = fetch_clob_collateral_balance_usd()
+        equity_debug['clob_collateral'] = clob_debug
+        if clob_equity is not None:
+            args.account_equity_usd = clob_equity
+            equity_source = 'live_clob_collateral_balance'
         else:
-            # data-api's /value reflects portfolio value including open
-            # positions (confirmed against a real account), not spendable
-            # cash -- wrong for sizing, so it's not used as a fallback here.
-            args.account_equity_usd = float(os.getenv('BTC5M_ACCOUNT_EQUITY_USD_FALLBACK', '100'))
-            equity_source = 'fallback_static_onchain_failed'
+            funder = os.getenv('PM_FUNDER') or os.getenv('PM_ADDRESS') or ''
+            onchain_equity, onchain_debug = fetch_onchain_usdc_balance_usd(funder) if funder else (None, {})
+            equity_debug['onchain'] = onchain_debug
+            if onchain_equity is not None:
+                args.account_equity_usd = onchain_equity
+                equity_source = 'live_onchain_usdc_balance'
+            else:
+                args.account_equity_usd = float(os.getenv('BTC5M_ACCOUNT_EQUITY_USD_FALLBACK', '100'))
+                equity_source = 'fallback_static_all_failed'
 
     effective_stake_usd = args.stake_usd if args.stake_usd is not None else min(
         args.account_equity_usd * args.risk_frac, args.max_notional_usd
