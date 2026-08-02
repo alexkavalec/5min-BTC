@@ -7,7 +7,7 @@ ARG ENGINE_REPO_URL=https://github.com/alexkavalec/polymarket-hl-strategy.git
 # from cache and engine updates silently never reach the image -- the
 # runtime then fails on whatever the old checkout was missing. Bump this
 # when the engine changes; it doubles as a record of what is deployed.
-ARG ENGINE_REF=a51f3635657a6e73ffe8802761a7c0fab824349b
+ARG ENGINE_REF=d01493035d3291c9800bf892d9f6568cfea9402d
 ENV BTC5M_REPO=/engine
 
 RUN apt-get update \

@@ -339,11 +339,13 @@ def fetch_clob_collateral_balance_usd(clob_base: str = 'https://clob.polymarket.
         if v1 and v2 and v3:
             creds = ApiCreds(api_key=v1, api_secret=v2, api_passphrase=v3)
         else:
-            # v1's create-then-derive convenience, which v2 dropped.
+            # Derive before create. The key already exists, so create always
+            # 400s, and v2's client prints that to stderr on every attempt --
+            # a per-cycle error line for a call that was never going to work.
             try:
-                creds = client.create_api_key()
-            except Exception:
                 creds = client.derive_api_key()
+            except Exception:
+                creds = client.create_api_key()
         client.set_api_creds(creds)
     except Exception as e:
         debug['error'] = str(e)
@@ -741,43 +743,66 @@ def main():
             side, trigger_price = sorted(candidates, key=lambda x: x[1], reverse=True)[0]
 
             # Polymarket rejects orders under the market's share minimum. Catch
-            # it here so the cause is stated plainly, rather than surfacing as
-            # an opaque rejection from the exchange at execute time -- and bail
-            # out instead of polling on, since entries only happen at or above
-            # the threshold price, so a stake short of the minimum at the
-            # cheapest allowed price can't clear it later in this run either.
+            # it here rather than letting it surface as an opaque rejection
+            # from the exchange at execute time. The minimum is denominated in
+            # shares, so its dollar cost climbs with the entry price -- a fixed
+            # percentage stake clears it at 0.70 and can fall a cent short at
+            # 0.99. Round up to the minimum when the account and the notional
+            # cap both allow it, instead of discarding a valid signal over
+            # rounding; block only when it genuinely can't be afforded.
             order_min_size = float(m.get('orderMinSize') or 0)
-            shares = (effective_stake_usd / trigger_price) if trigger_price > 0 else 0.0
-            if order_min_size and shares < order_min_size:
-                report['attempts'].append({
-                    'ts': ts_utc(),
-                    'slug': slug,
-                    'status': 'skip_stake_below_market_minimum',
-                    'side': side,
-                    'trigger_price': trigger_price,
-                    'stake_usd': effective_stake_usd,
-                    'shares_at_trigger': shares,
-                    'order_min_size': order_min_size,
-                })
-                report['finished_at'] = ts_utc()
-                report['result'] = 'blocked'
-                report['blocked_reason'] = 'stake_below_market_minimum'
-                report['stake_minimum_detail'] = {
-                    'order_min_size': order_min_size,
-                    'shares_at_trigger': shares,
-                    'stake_usd': effective_stake_usd,
-                    'trigger_price': trigger_price,
-                    'usd_needed_at_trigger': order_min_size * trigger_price,
-                    'usd_needed_at_threshold': order_min_size * args.threshold,
-                    'account_equity_usd': args.account_equity_usd,
-                    'hint': 'raise risk_frac/stake_usd or fund the account so risk_frac clears the minimum',
-                }
-                report['attempts_total_count'] = len(report['attempts'])
-                report['attempts'] = report['attempts'][-ATTEMPTS_LOG_TAIL:]
-                print(json.dumps(report, ensure_ascii=False, indent=2))
-                return
+            stake_for_entry = effective_stake_usd
+            if order_min_size and trigger_price > 0:
+                # One cent of headroom so float division can't land a hair
+                # under the minimum (4.9373/0.99 = 4.9872 shares, not 5).
+                min_notional = round(order_min_size * trigger_price + 0.01, 2)
+                affordable = (
+                    min_notional <= args.max_notional_usd
+                    and min_notional <= args.account_equity_usd
+                )
+                if stake_for_entry < min_notional and affordable:
+                    report['attempts'].append({
+                        'ts': ts_utc(),
+                        'slug': slug,
+                        'status': 'stake_raised_to_market_minimum',
+                        'side': side,
+                        'trigger_price': trigger_price,
+                        'stake_usd_before': stake_for_entry,
+                        'stake_usd': min_notional,
+                        'order_min_size': order_min_size,
+                    })
+                    stake_for_entry = min_notional
+                elif stake_for_entry < min_notional:
+                    report['attempts'].append({
+                        'ts': ts_utc(),
+                        'slug': slug,
+                        'status': 'skip_stake_below_market_minimum',
+                        'side': side,
+                        'trigger_price': trigger_price,
+                        'stake_usd': stake_for_entry,
+                        'shares_at_trigger': stake_for_entry / trigger_price,
+                        'order_min_size': order_min_size,
+                    })
+                    report['finished_at'] = ts_utc()
+                    report['result'] = 'blocked'
+                    report['blocked_reason'] = 'stake_below_market_minimum'
+                    report['stake_minimum_detail'] = {
+                        'order_min_size': order_min_size,
+                        'shares_at_trigger': stake_for_entry / trigger_price,
+                        'stake_usd': stake_for_entry,
+                        'trigger_price': trigger_price,
+                        'usd_needed_at_trigger': min_notional,
+                        'usd_needed_at_threshold': order_min_size * args.threshold,
+                        'max_notional_usd': args.max_notional_usd,
+                        'account_equity_usd': args.account_equity_usd,
+                        'hint': 'minimum exceeds max_notional_usd or account equity; raise the cap or fund the account',
+                    }
+                    report['attempts_total_count'] = len(report['attempts'])
+                    report['attempts'] = report['attempts'][-ATTEMPTS_LOG_TAIL:]
+                    print(json.dumps(report, ensure_ascii=False, indent=2))
+                    return
 
-            out, objs = run_open(args.repo, slug, side, effective_stake_usd, args.execute)
+            out, objs = run_open(args.repo, slug, side, stake_for_entry, args.execute)
             post = None
             runner = None
             for o in objs:
