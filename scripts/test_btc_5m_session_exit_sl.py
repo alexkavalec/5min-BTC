@@ -301,7 +301,13 @@ def fetch_clob_collateral_balance_usd(clob_base: str = 'https://clob.polymarket.
     try:
         funder = os.getenv('PM_FUNDER') or os.getenv('PM_ADDRESS') or None
         sig = int(os.getenv('PM_SIGNATURE_TYPE', '2'))
+        debug['funder_used'] = funder
+        debug['signature_type_used'] = sig
         client = ClobClient(host=clob_base, chain_id=POLYGON, key=key, signature_type=sig, funder=funder)
+        try:
+            debug['signer_address'] = client.get_address()
+        except Exception as e:
+            debug['signer_address_error'] = str(e)
         v1 = os.getenv('PM_API_KEY') or ''
         v2 = os.getenv('PM_API_SECRET') or ''
         v3 = os.getenv('PM_API_PASSPHRASE') or ''
