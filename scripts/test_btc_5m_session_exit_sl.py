@@ -98,24 +98,6 @@ def fetch_event(slug: str) -> Optional[dict[str, Any]]:
     return arr[0] if arr else None
 
 
-def fetch_account_value_usd(address: str) -> Optional[float]:
-    """Live portfolio value (cash + open positions) from Polymarket's public data API.
-
-    Observed to sometimes disagree with the actual spendable USDC cash shown
-    in Polymarket's own UI (possibly an indexing lag, or a narrower metric
-    than true cash) -- kept only as a fallback behind the on-chain check.
-    """
-    try:
-        r = requests.get('https://data-api.polymarket.com/value', params={'user': address}, timeout=10)
-        r.raise_for_status()
-        arr = r.json()
-        if isinstance(arr, list) and arr:
-            return float(arr[0].get('value'))
-    except Exception:
-        pass
-    return None
-
-
 # Polygon USDC contracts Polymarket has used (native + the older bridged
 # USDC.e); balances are summed since either could hold funds.
 _USDC_CONTRACTS = (
@@ -123,9 +105,10 @@ _USDC_CONTRACTS = (
     '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',  # bridged USDC.e
 )
 _POLYGON_RPCS = (
-    'https://polygon-rpc.com',
-    'https://rpc.ankr.com/polygon',
-    'https://polygon.llamarpc.com',
+    'https://polygon-bor-rpc.publicnode.com',
+    'https://polygon.meowrpc.com',
+    'https://1rpc.io/matic',
+    'https://polygon-mainnet.public.blastapi.io',
 )
 
 
@@ -490,13 +473,11 @@ def main():
             args.account_equity_usd = onchain_equity
             equity_source = 'live_onchain_usdc_balance'
         else:
-            live_equity = fetch_account_value_usd(funder) if funder else None
-            if live_equity is not None:
-                args.account_equity_usd = live_equity
-                equity_source = 'live_polymarket_value_fallback'
-            else:
-                args.account_equity_usd = float(os.getenv('BTC5M_ACCOUNT_EQUITY_USD_FALLBACK', '100'))
-                equity_source = 'fallback_static_fetch_failed'
+            # data-api's /value reflects portfolio value including open
+            # positions (confirmed against a real account), not spendable
+            # cash -- wrong for sizing, so it's not used as a fallback here.
+            args.account_equity_usd = float(os.getenv('BTC5M_ACCOUNT_EQUITY_USD_FALLBACK', '100'))
+            equity_source = 'fallback_static_onchain_failed'
 
     effective_stake_usd = args.stake_usd if args.stake_usd is not None else min(
         args.account_equity_usd * args.risk_frac, args.max_notional_usd
