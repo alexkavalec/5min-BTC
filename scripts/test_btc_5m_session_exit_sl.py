@@ -712,6 +712,43 @@ def main():
 
             side, trigger_price = sorted(candidates, key=lambda x: x[1], reverse=True)[0]
 
+            # Polymarket rejects orders under the market's share minimum. Catch
+            # it here so the cause is stated plainly, rather than surfacing as
+            # an opaque rejection from the exchange at execute time -- and bail
+            # out instead of polling on, since entries only happen at or above
+            # the threshold price, so a stake short of the minimum at the
+            # cheapest allowed price can't clear it later in this run either.
+            order_min_size = float(m.get('orderMinSize') or 0)
+            shares = (effective_stake_usd / trigger_price) if trigger_price > 0 else 0.0
+            if order_min_size and shares < order_min_size:
+                report['attempts'].append({
+                    'ts': ts_utc(),
+                    'slug': slug,
+                    'status': 'skip_stake_below_market_minimum',
+                    'side': side,
+                    'trigger_price': trigger_price,
+                    'stake_usd': effective_stake_usd,
+                    'shares_at_trigger': shares,
+                    'order_min_size': order_min_size,
+                })
+                report['finished_at'] = ts_utc()
+                report['result'] = 'blocked'
+                report['blocked_reason'] = 'stake_below_market_minimum'
+                report['stake_minimum_detail'] = {
+                    'order_min_size': order_min_size,
+                    'shares_at_trigger': shares,
+                    'stake_usd': effective_stake_usd,
+                    'trigger_price': trigger_price,
+                    'usd_needed_at_trigger': order_min_size * trigger_price,
+                    'usd_needed_at_threshold': order_min_size * args.threshold,
+                    'account_equity_usd': args.account_equity_usd,
+                    'hint': 'raise risk_frac/stake_usd or fund the account so risk_frac clears the minimum',
+                }
+                report['attempts_total_count'] = len(report['attempts'])
+                report['attempts'] = report['attempts'][-ATTEMPTS_LOG_TAIL:]
+                print(json.dumps(report, ensure_ascii=False, indent=2))
+                return
+
             out, objs = run_open(args.repo, slug, side, effective_stake_usd, args.execute)
             post = None
             runner = None
