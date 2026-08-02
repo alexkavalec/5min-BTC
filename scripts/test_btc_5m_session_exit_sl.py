@@ -499,7 +499,10 @@ def main():
             close_reason = f'time_exit_{args.exit_before_sec}s_before_end'
             break
 
-        side_px = get_side_price_from_slug(opened['market_slug'], opened['side'])
+        try:
+            side_px = clob_best_bid(opened['token_id'])
+        except Exception:
+            side_px = None
         report['last_side_price'] = side_px
         report['last_check_at'] = ts_utc()
         if side_px is not None and side_px <= sl_price:
@@ -514,7 +517,22 @@ def main():
     force_close_used = None
     client = auth_clob_client()
 
+    # Hard wall-clock cap so retries can't keep firing well past market
+    # resolution; a few seconds of slack allows one last-chance close.
+    close_deadline = end_ts + 5.0
+
     for i in range(max(1, int(args.close_retry_max))):
+        if time.time() >= close_deadline:
+            close_debug.append({
+                'ts': ts_utc(),
+                'attempt': i + 1,
+                'order_type': 'ABORT',
+                'status': 'deadline_exceeded',
+                'close_skipped': 'market_resolution_deadline',
+            })
+            report['close_abandoned_reason'] = 'market_resolution_deadline'
+            break
+
         out, objs = run_close(
             args.repo,
             opened['market_slug'],
