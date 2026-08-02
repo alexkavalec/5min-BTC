@@ -285,13 +285,22 @@ def auth_clob_client(clob_base: str = 'https://clob.polymarket.com') -> Optional
         return None
 
 
+# Polymarket resolves the wallet from the authenticated signer plus the
+# signature_type query param; the local `funder` is never sent on this
+# endpoint. An account created under a flow whose type we don't send back
+# answers with a balance of 0 instead of an error, so probe every known
+# type rather than trusting a single zero. 3 (EIP-1271 deposit wallet) is
+# newer than this pinned client's enum but the value is passed straight
+# through to the query string, so it can still be requested.
+_SIG_TYPE_PROBE_ORDER = (3, 2, 1, 0)
+
+
 def fetch_clob_collateral_balance_usd(clob_base: str = 'https://clob.polymarket.com') -> tuple[Optional[float], dict[str, Any]]:
     """Spendable USDC collateral per Polymarket's own CLOB backend.
 
-    This is the same accounting the trading engine itself uses to know what
-    it can actually spend -- authoritative regardless of whether Polymarket
-    custodies collateral in the user's own wallet or a pooled contract,
-    unlike guessing from public on-chain/API data.
+    Returns the first funded signature_type's balance, 0.0 if every type
+    answered a conclusive zero, or None if no type produced a usable answer.
+    `probes` in the debug output records what each type reported.
     """
     debug: dict[str, Any] = {}
     key = os.getenv('PM_PRIVATE_KEY') or ''
@@ -300,10 +309,10 @@ def fetch_clob_collateral_balance_usd(clob_base: str = 'https://clob.polymarket.
         return None, debug
     try:
         funder = os.getenv('PM_FUNDER') or os.getenv('PM_ADDRESS') or None
-        sig = int(os.getenv('PM_SIGNATURE_TYPE', '2'))
+        env_sig = int(os.getenv('PM_SIGNATURE_TYPE', '2'))
         debug['funder_used'] = funder
-        debug['signature_type_used'] = sig
-        client = ClobClient(host=clob_base, chain_id=POLYGON, key=key, signature_type=sig, funder=funder)
+        debug['signature_type_env'] = env_sig
+        client = ClobClient(host=clob_base, chain_id=POLYGON, key=key, signature_type=env_sig, funder=funder)
         try:
             debug['signer_address'] = client.get_address()
         except Exception as e:
@@ -316,16 +325,35 @@ def fetch_clob_collateral_balance_usd(clob_base: str = 'https://clob.polymarket.
         else:
             creds = client.create_or_derive_api_creds()
         client.set_api_creds(creds)
-
-        raw = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=sig))
-        debug['raw'] = raw
-        if not isinstance(raw, dict) or raw.get('balance') is None:
-            debug['error'] = 'no balance field in response'
-            return None, debug
-        return float(raw['balance']) / 1_000_000.0, debug
     except Exception as e:
         debug['error'] = str(e)
         return None, debug
+
+    probes: list[dict[str, Any]] = []
+    debug['probes'] = probes
+    saw_conclusive_zero = False
+    for sig in (env_sig, *(s for s in _SIG_TYPE_PROBE_ORDER if s != env_sig)):
+        try:
+            raw = client.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=sig)
+            )
+            if not isinstance(raw, dict) or raw.get('balance') is None:
+                probes.append({'signature_type': sig, 'ok': False, 'error': 'no balance field', 'raw': raw})
+                continue
+            usd = float(raw['balance']) / 1_000_000.0
+            probes.append({'signature_type': sig, 'ok': True, 'usd': usd})
+            if usd > 0:
+                debug['signature_type_used'] = sig
+                return usd, debug
+            saw_conclusive_zero = True
+        except Exception as e:
+            probes.append({'signature_type': sig, 'ok': False, 'error': str(e)})
+
+    if saw_conclusive_zero:
+        debug['note'] = 'every signature_type reported 0 collateral'
+        return 0.0, debug
+    debug['error'] = 'no signature_type returned a usable balance'
+    return None, debug
 
 
 def poll_order_status(client: Optional[ClobClient], order_id: str, wait_sec: float = 6.0, step_sec: float = 1.0) -> tuple[str, Optional[dict[str, Any]]]:
@@ -516,16 +544,35 @@ def main():
         # can't see pooled custody; this asks the exchange itself).
         clob_equity, clob_debug = fetch_clob_collateral_balance_usd()
         equity_debug['clob_collateral'] = clob_debug
-        if clob_equity is not None:
+        if clob_equity is not None and clob_equity > 0:
             args.account_equity_usd = clob_equity
             equity_source = 'live_clob_collateral_balance'
         else:
-            funder = os.getenv('PM_FUNDER') or os.getenv('PM_ADDRESS') or ''
-            onchain_equity, onchain_debug = fetch_onchain_usdc_balance_usd(funder) if funder else (None, {})
+            # A zero from the CLOB is not proof of an empty account, so fall
+            # through and read the chain directly. Check the signer EOA as
+            # well as the funder: which of the two custodies cash depends on
+            # how the Polymarket account was created.
+            onchain_debug: dict[str, Any] = {}
             equity_debug['onchain'] = onchain_debug
-            if onchain_equity is not None:
-                args.account_equity_usd = onchain_equity
+            candidates = (
+                ('funder', os.getenv('PM_FUNDER') or os.getenv('PM_ADDRESS') or ''),
+                ('signer', str(clob_debug.get('signer_address') or '')),
+            )
+            best = None
+            for label, addr in candidates:
+                if not addr:
+                    continue
+                val, dbg = fetch_onchain_usdc_balance_usd(addr)
+                onchain_debug[label] = dbg | {'usd': val}
+                if val is not None and (best is None or val > best):
+                    best = val
+
+            if best is not None and best > 0:
+                args.account_equity_usd = best
                 equity_source = 'live_onchain_usdc_balance'
+            elif clob_equity is not None or best is not None:
+                args.account_equity_usd = 0.0
+                equity_source = 'live_confirmed_zero'
             else:
                 args.account_equity_usd = float(os.getenv('BTC5M_ACCOUNT_EQUITY_USD_FALLBACK', '100'))
                 equity_source = 'fallback_static_all_failed'
@@ -567,7 +614,12 @@ def main():
     report['daily_loss_cap_usd'] = daily_loss_cap_usd
 
     blocked_reason = None
-    if daily_state['realized_pnl_usdc'] <= -daily_loss_cap_usd:
+    if args.account_equity_usd <= 0:
+        # Guard first: with zero equity the loss cap is also zero, and a
+        # flat 0.00 P&L would otherwise read as "cap reached" on a day with
+        # no trades at all.
+        blocked_reason = 'account_equity_unavailable'
+    elif daily_loss_cap_usd > 0 and daily_state['realized_pnl_usdc'] <= -daily_loss_cap_usd:
         blocked_reason = 'daily_loss_cap_reached'
     elif daily_state['trade_count'] >= args.max_trades_per_day:
         blocked_reason = 'max_trades_per_day_reached'
